@@ -10646,7 +10646,9 @@ async function main() {
   // 与「未读消息」无关的唤醒原因（定时器/引导）。这些原因在会话繁忙时被暂存后，
   // 不能用「unread 里还有没有对应 seq」来判断是否还要补发 —— 那一轮很可能已经把
   // 未读全部标读了，结果就是 timeout 定时器被静默丢掉、会话停在无定时器的静默态。
-  const TIMER_WAKE_REASONS = new Set(['timeout', 'replyCheck', 'proactiveCheck', 'bootstrap', 'admin']);
+  // diary 也算定时唤醒：它在 22:00 到点、跟未读消息无关，绝不能被「已被当前回合处理」吞掉
+  // （真实事故：22:00 正好在忙，diary 被当成消息类唤醒跳过，当天日记就没写）。
+  const TIMER_WAKE_REASONS = new Set(['timeout', 'replyCheck', 'proactiveCheck', 'bootstrap', 'admin', 'diary']);
   function isTimerWakeReason(reason) {
     return TIMER_WAKE_REASONS.has(String(reason ?? '').split(':')[0]);
   }
@@ -10860,6 +10862,8 @@ async function main() {
   // 到点后用既有的唤醒调度把 AI 叫起来（reason='diary'），由它调 qq_write_diary 落笔。
   // 只排一个 setTimeout：触发后立刻排下一天，避免多实例/多次设置导致重复唤醒。
   let diaryTimer = null;
+  // 「今天还没写日记」的补写只排一次，避免反复进出 reserved2（模式切换/重连）时堆多个补写定时器。
+  let diaryCatchUpArmed = false;
   function scheduleDiaryV2() {
     const d = cfg.socialV2?.diary ?? {};
     if (d.enabled !== true) {
@@ -10898,6 +10902,36 @@ async function main() {
     }, next.getTime() - now.getTime());
     diaryTimer.unref?.();
     log(`[diary] 已排程：每天 ${String(hh).padStart(2, '0')}:${String(mm).padStart(2, '0')} 写日记（下次 ${next.toLocaleString()}，目标 ${targetKey}）`);
+
+    // 补写：今天已经过了写日记的点，但日记文件里还没有今天的日期戳
+    // （典型场景：22:00 时电脑关着 / 桥接没运行）。启动后 60 秒补一次，
+    // 以「文件里有没有今天的日期戳」为准，重启多少次都不会重复写。
+    const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate(), hh, mm, 0, 0);
+    const todayLabel = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
+    if (now.getTime() >= todayStart.getTime() && !diaryHasDate(todayLabel) && !diaryCatchUpArmed) {
+      diaryCatchUpArmed = true;
+      const t = setTimeout(() => {
+        try {
+          if (!diaryHasDate(todayLabel)) {
+            log(`[diary] 今天（${todayLabel}）的日记还没写，补一次唤醒`);
+            scheduleWakeV2(targetKey, 'diary');
+          }
+        } catch (error) {
+          log('日记补写唤醒失败:', error?.message ?? error);
+        }
+      }, 60000);
+      t.unref?.();
+      log(`[diary] 今天（${todayLabel}）的日记还没写：60 秒后补一次`);
+    }
+  }
+
+  /** 日记文件里是否已有某一天的日期戳（`===== YYYY-MM-DD`）。 */
+  function diaryHasDate(label) {
+    try {
+      return fs.readFileSync(path.join(ROOT, 'diary', '日记.txt'), 'utf8').includes(`===== ${label}`);
+    } catch {
+      return false;
+    }
   }
 
   function drainPromptQueue(key, errorMsg) {
