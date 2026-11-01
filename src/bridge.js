@@ -10712,7 +10712,11 @@ async function main() {
   function replayPendingWakeReasonsV2(key) {
     const st = getSocialV2State(key);
     if (!Array.isArray(st.pendingWakeReasons) || !st.pendingWakeReasons.length) return null;
-    const item = st.pendingWakeReasons.shift();
+    // 优先取「定时类」原因：它们和未读消息无关，不能排在几十条积压消息后面等回合一个个消化
+    //（真实事故：22:00 会话忙 → diary 排在一串消息原因后面 → 一直轮不到，当天日记没写）。
+    let pick = st.pendingWakeReasons.findIndex((it) => it && isTimerWakeReason(it.reason));
+    if (pick < 0) pick = 0;
+    const item = st.pendingWakeReasons.splice(pick, 1)[0];
     if (!item || typeof item !== 'object') return null;
     if (isTimerWakeReason(item.reason)) {
       if (item.reason === 'timeout') {
@@ -10724,6 +10728,9 @@ async function main() {
       } else if (item.reason === 'proactiveCheck') {
         // 主动机会有周期性重排，错过一次可接受（也不该在回合结束时立刻补一刀）。
         log(`[reserved2] ${key} 繁忙期间的主动机会已过期，跳过补发`);
+      } else if (item.reason === 'diary' && diaryHasDate(diaryDateLabel())) {
+        // 今天的日记已经写过了（可能这一轮里自己写的），不再重复唤醒。
+        log(`[reserved2] ${key} 繁忙期间的日记唤醒：今天已写过，跳过`);
       } else {
         log(`[reserved2] ${key} 补发繁忙期间积压的唤醒：${item.reason}`);
         scheduleWakeV2(key, item.reason);
@@ -10738,6 +10745,12 @@ async function main() {
     }
     log(`[reserved2] ${key} 繁忙期间唤醒 ${item.reason}@seq${item.seq} 已被当前回合处理，跳过补发`);
     return { reason: item.reason, action: 'skipped' };
+  }
+
+  /** 今天的日期戳（与日记文件里的 `===== YYYY-MM-DD` 对应）。 */
+  function diaryDateLabel(d = new Date()) {
+    const pad = (n) => String(n).padStart(2, '0');
+    return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
   }
 
   function setupSleepTimerV2(key) {
@@ -10907,8 +10920,11 @@ async function main() {
     // （典型场景：22:00 时电脑关着 / 桥接没运行）。启动后 60 秒补一次，
     // 以「文件里有没有今天的日期戳」为准，重启多少次都不会重复写。
     const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate(), hh, mm, 0, 0);
-    const todayLabel = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
-    if (now.getTime() >= todayStart.getTime() && !diaryHasDate(todayLabel) && !diaryCatchUpArmed) {
+    const todayLabel = diaryDateLabel(now);
+    // 留 10 分钟宽限：22:00 那一刻定时器自己会触发，这里只负责「真的错过了」
+    // （当时电脑关着 / 桥接没运行 / 定时器被吞），否则会重复排一次唤醒。
+    const missedToday = now.getTime() >= todayStart.getTime() + 10 * 60 * 1000;
+    if (missedToday && !diaryHasDate(todayLabel) && !diaryCatchUpArmed) {
       diaryCatchUpArmed = true;
       const t = setTimeout(() => {
         try {
