@@ -3027,7 +3027,19 @@ async function main() {
   // DSH 端口自动发现的节流状态：DSH 挂掉时每 ~30 秒探一次，避免 5 秒轮询每次都扫端口。
   let lastDshDiscoverAt = 0;
   let dshDiscovering = false;
-  const checkDsh = async () => {    let ok = false;
+  const checkDsh = async () => {
+    // 回合看门狗：DSH 偶尔会卡在一个永不完结的回合（实测 17:40 那次卡了 6 分钟，
+    // 期间所有 QQ 消息只能排队，看起来就是「机器人不回消息」）。超过阈值就 cancel 掉，
+    // 让队列继续；阈值要大于 qq_wait_for_messages 的最大等待（10 分钟）。
+    const turnTimeoutMs = Math.max(60_000, Number(cfg.socialV2?.wake?.turnTimeoutMs) || 12 * 60 * 1000);
+    for (const [sid, startedAt] of v2TurnStartAt) {
+      if (!startedAt || Date.now() - startedAt < turnTimeoutMs) continue;
+      v2TurnStartAt.delete(sid);
+      log(`⏱️ 回合超时（${Math.round((Date.now() - startedAt) / 60000)} 分钟未结束），已取消 ${sid}`);
+      appendActivity(`回合超时，已取消 ${sid}`);
+      try { await api.sessions.cancel({ sessionId: sid }); } catch (error) { log('取消超时回合失败:', error?.message ?? error); }
+    }
+    let ok = false;
     try {
       await api.settings.describe({});
       ok = true;
