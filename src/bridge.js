@@ -10428,7 +10428,7 @@ async function main() {
       return `${base}【主动机会】${key}\n原因：群里已经安静了一段时间，这是一次你可以主动冒泡的机会。\n优先主动开个话题、追问上次没聊完的事、分享一个刚想到的想法；如果一时想不到，可以用 mcp__web-search-safe__web_search 搜一下当前热点/时事/网络热梗，再结合记忆里的群友兴趣挑一个自然角度。只要内容自然，就大胆开口；如果实在没话想说，再安静收尾（qq_mark_read 或 qq_set_wake_config）。`;
     }
     if (reason === 'diary') {
-      return `${base}【写日记】${key}\n原因：到了每天写日记的时间。\n请调用 qq_write_diary，把今天真正发生的事和你的感受写成一篇**简短**的日记（第一人称，1~2 段，200~400 字）：可以写群聊里有意思的片段、你自己想到的事、今天的情绪；不要编造没发生的事，不要把别人的隐私、群聊原文、本机路径或凭据写进去。**保持简短**（工具参数过长容易被截断导致写入失败），写完跟管理员说一句日记写好了，然后按平常的收尾流程（沉睡前观察 → 设置下次唤醒）结束。`;
+      return `${base}【写日记】${key}\n原因：到了每天写日记的时间。\n请调用 qq_write_diary，把今天真正发生的事和你的感受写成一篇日记（第一人称）：可以写群聊里有意思的片段、你自己想到的事、今天的情绪；**字数不限**，想写多长写多长（分段、多用几个自然段都可以），但不要为凑字数灌水。不要编造没发生的事，不要把别人的隐私、群聊原文、本机路径或凭据写进去。写完跟管理员说一句日记写好了，然后按平常的收尾流程（沉睡前观察 → 设置下次唤醒）结束。`;
     }
     if (reason === 'poke') {
       return `${base}【唤醒】${key}\n原因：有人拍了一拍（可能拍了你，也可能拍了别人）。\n先看未读/最近消息里的 [拍一拍] 事件：如果是拍你，可以自然回应一句，也可以用 qq_send_poke 回一个拍一拍；如果是拍别人，觉得有趣也可以接梗。除了回应，偶尔也可以主动戳一下正在聊的人/熟人，像真人手贱/提醒/逗一下，但别频繁。不想接就安静收尾（qq_mark_read 或 qq_set_wake_config）。`;
@@ -11098,6 +11098,30 @@ async function main() {
           try { await withTimeout(api.workspace.archiveSession({ sessionId: old }), DSH_CONTROL_TIMEOUT_MS, 'archiveSession'); } catch {}
           await sendToQQ(key, '已重置会话，下次消息将开新上下文');
         }
+        return;
+      }
+      // 软重置：只清 DSH 上下文，**保留**桥接侧的记忆条目与最近消息。
+      // 用途：聊久了上下文涨到几十万 token，回复越来越慢，但不想让她忘事。
+      if (plainContent === '/softreset' || plainContent === '/compact') {
+        const old = state.sessions[key];
+        if (!old) { await sendToQQ(key, '当前没有需要软重置的会话'); return; }
+        sessionEpoch++;
+        delete state.sessions[key];
+        delete state.sessionPolicies[key];
+        modelAppliedSessions.delete(old);
+        reverse.delete(old);
+        collectors.delete(old);
+        sendToolSucceededSessions.delete(old);
+        pendingSendToolCalls.delete(old);
+        v2TurnStartAt.delete(old);
+        turnLeaseNoted.delete(old);
+        toolCallNames.delete(old);
+        drainPromptQueue(key, '会话已软重置');
+        saveState();
+        try { await withTimeout(api.stopSessionWork(old), DSH_CONTROL_TIMEOUT_MS, 'stopSessionWork'); } catch {}
+        try { await withTimeout(api.workspace.archiveSession({ sessionId: old }), DSH_CONTROL_TIMEOUT_MS, 'archiveSession'); } catch {}
+        await sendToQQ(key, '已软重置：DSH 上下文清空，记忆和最近消息都保留，下一条消息会开新上下文');
+        log(`[softreset] ${key} 软重置完成（保留记忆与最近消息）`);
         return;
       }
       if (plainContent === '/status') {

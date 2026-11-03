@@ -269,7 +269,7 @@
       "enabled": false,
       "time": "22:00",
       "key": "",
-      "maxChars": 800
+      "maxChars": 20000
     }
   },
   "webSearch": {
