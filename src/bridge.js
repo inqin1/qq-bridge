@@ -2545,6 +2545,13 @@ async function main() {
    */
   const ACTIVE_WAIT_LEASE_MS = 15 * 60 * 1000;
   /**
+   * 但真正卡人的不是「并发等待」，而是**上一回合被取消/中止后留下的残留租约**：
+   * 宿主侧早就没有这个等待了，桥接却还占着名额，新回合第一次调用直接 429，
+   * 模型于是反复重试「已有等待中的等待」。所以只要旧租约超过 2 分钟，
+   * 就当作残留、允许新等待接管（同一个回合内不可能连续发起两次长等待）。
+   */
+  const ACTIVE_WAIT_TAKEOVER_MS = 2 * 60 * 1000;
+  /**
    * 回合判忙租约：只要 `turn/start` 的结束信号（turn/end）丢了，会话就会**永久**判忙，
    * 之后所有唤醒只进 pendingWakeReasons、QQ 上表现为「它不理我了」，只能重启（issue #11/#23/#26/#19）。
    * 正常回合 1~3 分钟，最长工具调用（DSH 的 toolCallTimeoutMs）≈12 分钟，15 分钟足以覆盖任何
@@ -6352,7 +6359,7 @@ async function main() {
           // 用原始 key 会给出两个租约槽（同一会话并发多个 5~10 分钟等待、互相踩水位）。
           // 租约过期则视为残留（handler 异常退出没清干净），允许接管而不是永久 429。
           const leaseKey = canonicalV2Key(key) ?? key;
-          if (activeWaits.has(leaseKey) && Date.now() - activeWaits.get(leaseKey) < ACTIVE_WAIT_LEASE_MS) {
+          if (activeWaits.has(leaseKey) && Date.now() - activeWaits.get(leaseKey) < ACTIVE_WAIT_TAKEOVER_MS) {
             sendJson({ ok: false, error: '该会话已有一个等待中的 qq_wait_for_messages，请等待它结束' }, 429);
             return;
           }
@@ -9278,6 +9285,14 @@ async function main() {
   // 实际的 DSH prompt 投递（不再直接对外暴露，统一走 promptQueues 串行队列）。
   async function deliverPromptNow(key, promptText, opts = {}) {
     if (!isSessionAllowedInCurrentMode(key)) throw new Error(`当前模式不允许会话 ${key}`);
+    // 新回合开始：同一会话之前若还挂着一个 qq_wait_for_messages（典型场景：上一回合被取消/超时
+    // 中止，但 HTTP 连接没关，租约还占着 15 分钟），新回合第一次等待就会拿到 429
+    // 「该会话已有一个等待中的 qq_wait_for_messages」——在 QQ 上表现为对话卡死。
+    // 新回合开始意味着旧等待必然已失效，这里直接释放租约。
+    try {
+      const leaseKey = canonicalV2Key(key) ?? key;
+      if (activeWaits.delete(leaseKey)) log(`[wait] 释放残留的等待租约 ${key}（新回合开始）`);
+    } catch {}
     // Recheck queued wakes at dispatch time: no model call while paused/disabled
     // and no reserved2 prompt leaking into an ordinary chat after a mode switch.
     const wakeBlocked = () => opts.wakeReason && (currentMode !== 'reserved2' || socialV2.paused || cfg.socialV2?.enabled === false);
