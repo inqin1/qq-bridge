@@ -9057,8 +9057,12 @@ async function main() {
       if (!target || ['__proto__', 'constructor', 'prototype'].includes(target)) return;
       if (!st.memberImpressions || typeof st.memberImpressions !== 'object') st.memberImpressions = {};
       const old = st.memberImpressions[target] || {};
-      const traits = Array.isArray(old.traits) ? old.traits.slice(0, 10) : [];
-      if (text && !traits.includes(text.slice(0, 50))) traits.push(text.slice(0, 50));
+      // 以前这里是 `old.traits.slice(0, 10)`：先截到 10 条再 push ⇒ 每次追加都会把第 11 条
+      // 挤掉，连续追加三条就只剩最后一条（真实事故：补的"嘴硬心软/18点赌约"当场被下一条覆盖）。
+      // 改成保留最近 19 条、追加后最多 20 条（超出时丢最旧的）。
+      const traits = Array.isArray(old.traits) ? old.traits.slice(-19) : [];
+      const line = text ? text.slice(0, 50) : '';
+      if (line && !traits.includes(line)) traits.push(line);
       st.memberImpressions[target] = {
         traits,
         interactionCount: (Number(old.interactionCount) || 0) + 1,
