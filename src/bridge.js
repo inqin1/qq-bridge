@@ -7424,6 +7424,16 @@ async function main() {
 
   // QQ 发送队列（顺序发送 + 间隔，避免触发频率限制）
   let sendChain = Promise.resolve();
+  // 会话级「上一条发出的时间」：用来保证跨回合也有最小间隔
+  // （典型场景：先回一句，隔几秒又想起来补一句 —— 批量内的 delays 管不到这种）。
+  const lastOutboundAt = new Map();
+  async function awaitSendGap(key) {
+    const minGap = Math.max(0, Number(cfg.socialV2?.send?.minIntervalMs) || 0);
+    if (!minGap) return;
+    const prev = lastOutboundAt.get(key) ?? 0;
+    const wait = prev + minGap - Date.now();
+    if (wait > 0) await sleep(wait);
+  }
   function redactKnownTokensOnly(text) {
     let s = String(text ?? '');
     for (const token of KNOWN_AGENT_TOKENS) {
@@ -8179,7 +8189,11 @@ async function main() {
       sendChain = sendChain
         .then(async () => {
           assertSendAllowed();
+          // 会话级最小间隔：跨回合也生效（比如先回一句，隔一会儿又补一句）。
+          // 批量内部的 delays 已经等过，这里通常只补差额，不会叠加成双倍。
+          await awaitSendGap(key);
           await onebotSend(kind, id, msg, useReply, useAt);
+          lastOutboundAt.set(key, Date.now());
           sent.push(msg);
         })
         .catch((error) => {
