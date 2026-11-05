@@ -182,7 +182,7 @@
       "maxWakePerHour": 12,
       "noActionLimit": 3,
       "maxWakeConfigReminders": 0,
-      "turnTimeoutMs": 720000
+      "turnTimeoutMs": 900000
     },
     "send": {
       "burstEnabled": true,
