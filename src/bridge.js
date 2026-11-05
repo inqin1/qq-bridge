@@ -8132,6 +8132,14 @@ async function main() {
   function computeGapsV2(messages, gapMode, gapMs, gaps, sendCfg) {
     const delays = [];
     if (!messages || messages.length <= 1) return delays;
+    // 强制固定间隔：不管模型传 gapMode/gapMs 是什么，每两条之间都等这么久。
+    // 用途：管理员想让她的分条节奏稳定（例如固定 8 秒）。
+    const forcedGap = Math.max(0, Number(cfg.socialV2?.send?.forceGapMs) || 0);
+    if (forcedGap > 0) {
+      const g = clampGapV2(forcedGap, sendCfg);
+      for (let i = 0; i < messages.length - 1; i++) delays.push(g);
+      return delays;
+    }
     const mode = gapMode === 'fixed' || gapMode === 'byLength' ? gapMode : 'auto';
     if (mode === 'fixed') {
       if (Array.isArray(gaps) && gaps.length >= messages.length - 1) {
