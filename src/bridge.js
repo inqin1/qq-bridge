@@ -3034,6 +3034,8 @@ async function main() {
   // DSH 端口自动发现的节流状态：DSH 挂掉时每 ~30 秒探一次，避免 5 秒轮询每次都扫端口。
   let lastDshDiscoverAt = 0;
   let dshDiscovering = false;
+  // 被「回合看门狗」取消的会话：这些取消是我们自己干的，不该在 QQ 上回一句「已停止」。
+  const watchdogCancelled = new Set();
   const checkDsh = async () => {
     // 回合看门狗：DSH 偶尔会卡在一个永不完结的回合（实测 17:40 那次卡了 6 分钟，
     // 期间所有 QQ 消息只能排队，看起来就是「机器人不回消息」）。超过阈值就 cancel 掉，
@@ -3041,9 +3043,19 @@ async function main() {
     const turnTimeoutMs = Math.max(60_000, Number(cfg.socialV2?.wake?.turnTimeoutMs) || 12 * 60 * 1000);
     for (const [sid, startedAt] of v2TurnStartAt) {
       if (!startedAt || Date.now() - startedAt < turnTimeoutMs) continue;
+      // 正在 qq_wait_for_messages 里的回合是**合法长回合**（沉睡前观察最长 10 分钟），
+      // 不能按卡死处理，否则看门狗会把正常等待砍掉并留下「已停止」。
+      const waitKey = reverse.get(sid);
+      if (waitKey && activeWaits.has(canonicalV2Key(waitKey) ?? waitKey)) continue;
       v2TurnStartAt.delete(sid);
       log(`⏱️ 回合超时（${Math.round((Date.now() - startedAt) / 60000)} 分钟未结束），已取消 ${sid}`);
       appendActivity(`回合超时，已取消 ${sid}`);
+      const cancelledKey = reverse.get(sid);
+      if (cancelledKey) {
+        watchdogCancelled.add(cancelledKey);
+        const t = setTimeout(() => watchdogCancelled.delete(cancelledKey), 60_000);
+        t.unref?.();
+      }
       try { await api.sessions.cancel({ sessionId: sid }); } catch (error) { log('取消超时回合失败:', error?.message ?? error); }
     }
     let ok = false;
@@ -11939,7 +11951,10 @@ async function main() {
                 }
               } else if (ended.reason.kind === 'aborted') {
                 log(`⏹️ 回合被中止 (${key})`);
-                await sendToQQ(key, '⏹️ 已停止');
+                // 不在 QQ 上回「已停止」：QQ 用户没有"取消"这个入口，所有中止都是内部技术原因
+                // （看门狗超时、DSH 重启、模型流中断），紧接着桥接会自动补发积压的唤醒。
+                // 以前每中止一次就发一条「⏹️ 已停止」，看起来像机器人在闹脾气。
+                if (watchdogCancelled.has(key)) watchdogCancelled.delete(key);
                 if (isFarewell) {
                   const st = socialState(key);
                   if (st.phase === 'exiting') {
